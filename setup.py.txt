@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+ERVI - Le Médecin Local du Codeur
+Setup file for pip installation
+Version: 3.3.0
+"""
+
+from setuptools import setup, find_packages
+
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
+
+setup(
+    name="ervi-doctor",
+    version="3.3.0",
+    author="Etienne Collin",
+    author_email="nillocetienne@hotmail.com",
+    description="🏥 ERVI - Le Médecin Local du Codeur | Diagnosticien Python tout-en-un 100% local",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="https://github.com/FreshAttitude/ERVI",
+    project_urls={
+        "Bug Reports": "https://github.com/FreshAttitude/ERVI/issues",
+        "Source": "https://github.com/FreshAttitude/ERVI",
+        "Profile": "https://github.com/FreshAttitude",
+    },
+    packages=find_packages(),
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Developers",
+        "Topic :: Software Development :: Testing",
+        "Topic :: Software Development :: Quality Assurance",
+    ],
+    python_requires=">=3.8",
+    install_requires=[
+        "psutil>=5.9.0,<7.0.0",
+    ],
+    extras_require={
+        "windows": [
+            "wmi>=1.5.1,<2.0.0",
+        ],
+        "pdf": [
+            "reportlab>=4.0.0,<5.0.0",
+        ],
+        "full": [
+            "psutil>=5.9.0,<7.0.0",
+            "reportlab>=4.0.0,<5.0.0",
+            "wmi>=1.5.1,<2.0.0 ; sys_platform == 'win32'",
+        ],
+    },
+    entry_points={
+        "console_scripts": [
+            "ervi=ervi:main",
+        ],
+    },
+    include_package_data=True,
+    keywords=[
+        "python",
+        "linter",
+        "diagnostic",
+        "code-quality",
+        "performance",
+        "security",
+        "monitoring",
+        "local",
+        "pdf",
+        "plugins",
+        "requirements",
+        "vs-code"
+    ],
+)

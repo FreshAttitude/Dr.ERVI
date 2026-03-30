@@ -1,0 +1,1386 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         🏥 ERVI - LE MÉDECIN LOCAL                          ║
+║                    Diagnosticien Ultime pour Codeur                         ║
+║                                                                              ║
+║  ✅ Double-clic / Drag & Drop → Diagnostic complet                          ║
+║  ✅ Ouvre VS Code à la ligne exacte de l'erreur                            ║
+║  ✅ Surveillance RAM / CPU / Température / Disque / Réseau                 ║
+║  ✅ Analyse code : syntaxe, structure, perf, sécurité, qualité            ║
+║  ✅ Génération automatique de tests unitaires                              ║
+║  ✅ Surveillance continue (auscultation temps réel)                        ║
+║  ✅ Analyse dépendances (versions, conflits)                               ║
+║  ✅ Analyse complexité cyclomatique                                        ║
+║  ✅ Export rapport en .txt                                                 ║
+║  ✅ Mode nuit/jour                                                         ║
+║  ✅ Suggestions automatiques de correction                                 ║
+║  ✅ MULTI-THREADING + CACHE (scanner projet entier en parallèle)          ║
+║  ✅ 100% Tkinter - Pas de serveur web                                     ║
+║  ✅ 100% Local - Aucun cloud                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+
+import sys
+import os
+import json
+import time
+import threading
+import subprocess
+import ast
+import builtins
+import inspect
+import tempfile
+import hashlib
+import re
+import concurrent.futures
+import multiprocessing
+from datetime import datetime
+from pathlib import Path
+from tkinter import *
+from tkinter import ttk, filedialog, scrolledtext, messagebox
+import psutil
+import tracemalloc
+
+# ==============================================================================
+# CONFIGURATION ERVI
+# ==============================================================================
+class ConfigERVI:
+    """Configuration du cabinet médical ERVI"""
+    VERSION = "3.2.0"
+    NOM = "ERVI"
+    
+    DOSSIER_PATIENT = Path.home() / "ERVI" / "patients"
+    DOSSIER_LOGS = Path.home() / "ERVI" / "logs"
+    DOSSIER_TESTS = Path.home() / "ERVI" / "tests"
+    DOSSIER_RAPPORTS = Path.home() / "ERVI" / "rapports"
+    
+    def __init__(self):
+        self.DOSSIER_PATIENT.mkdir(parents=True, exist_ok=True)
+        self.DOSSIER_LOGS.mkdir(parents=True, exist_ok=True)
+        self.DOSSIER_TESTS.mkdir(parents=True, exist_ok=True)
+        self.DOSSIER_RAPPORTS.mkdir(parents=True, exist_ok=True)
+        
+        self.FICHIER_HISTORIQUE = self.DOSSIER_PATIENT / "historique.json"
+        self.FICHIER_CONFIG = Path.home() / "ERVI" / "config.json"
+        
+        if self.FICHIER_HISTORIQUE.exists():
+            with open(self.FICHIER_HISTORIQUE, 'r', encoding='utf-8') as f:
+                self.historique = json.load(f)
+        else:
+            self.historique = {"consultations": [], "surveillance": []}
+        
+        self.surveillance_active = False
+        self.fichier_surveille = None
+        self.dernier_hash = None
+        self.theme_sombre = True  # Mode nuit par défaut
+
+config = ConfigERVI()
+
+# ==============================================================================
+# 1. CACHE ET MULTI-THREADING (NOUVEAU)
+# ==============================================================================
+class CacheDiagnostic:
+    """
+    Cache des résultats de diagnostic pour éviter de rescanner les fichiers
+    qui n'ont pas changé. Accélère considérablement les scans de projets.
+    """
+    
+    def __init__(self):
+        self.cache_file = config.DOSSIER_PATIENT / "cache_diagnostics.json"
+        self.cache = self._charger_cache()
+    
+    def _charger_cache(self):
+        """Charge le cache depuis le disque"""
+        if self.cache_file.exists():
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                pass
+        return {}
+    
+    def _sauvegarder_cache(self):
+        """Sauvegarde le cache sur le disque"""
+        try:
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, indent=2)
+        except:
+            pass
+    
+    def get(self, fichier):
+        """Récupère le diagnostic en cache si le fichier n'a pas changé"""
+        if str(fichier) not in self.cache:
+            return None
+        
+        cache_entry = self.cache[str(fichier)]
+        
+        # Vérifier si le fichier a changé depuis la dernière analyse
+        try:
+            mtime = os.path.getmtime(fichier)
+            if cache_entry.get("mtime") == mtime:
+                return cache_entry.get("result")
+        except:
+            pass
+        
+        return None
+    
+    def set(self, fichier, result):
+        """Met en cache le résultat d'un diagnostic"""
+        try:
+            mtime = os.path.getmtime(fichier)
+            self.cache[str(fichier)] = {
+                "mtime": mtime,
+                "result": result,
+                "timestamp": datetime.now().isoformat()
+            }
+            self._sauvegarder_cache()
+        except:
+            pass
+    
+    def clear(self):
+        """Vide le cache"""
+        self.cache = {}
+        self._sauvegarder_cache()
+
+
+class ScannerMultiThread:
+    """
+    Scanner multi-thread pour analyser plusieurs fichiers en parallèle.
+    Exploite tous les cœurs du processeur pour accélérer les scans.
+    """
+    
+    def __init__(self, max_workers=None):
+        if max_workers is None:
+            self.max_workers = multiprocessing.cpu_count()
+        else:
+            self.max_workers = max_workers
+        
+        self.cache = CacheDiagnostic()
+    
+    def scanner_fichier(self, fichier, callback_progress=None):
+        """
+        Scanne un fichier avec mise en cache.
+        Retourne (fichier, diagnostics, score, suggestions, depuis_cache)
+        """
+        # Vérifier le cache
+        cache_result = self.cache.get(fichier)
+        if cache_result is not None:
+            if callback_progress:
+                callback_progress(fichier, "cache")
+            return (fichier, *cache_result, True)
+        
+        # Scanner le fichier
+        if callback_progress:
+            callback_progress(fichier, "scan")
+        
+        diagnosticien = DiagnosticienCode(fichier)
+        diagnostics, score, suggestions = diagnosticien.scanner_complet()
+        
+        result = (diagnostics, score, suggestions)
+        
+        # Mettre en cache
+        self.cache.set(fichier, result)
+        
+        return (fichier, *result, False)
+    
+    def scanner_dossier(self, dossier, extension=".py", callback_progress=None):
+        """
+        Scanne tous les fichiers .py d'un dossier en parallèle.
+        Retourne une liste de résultats.
+        """
+        dossier = Path(dossier)
+        if not dossier.exists():
+            return []
+        
+        # Récupérer tous les fichiers .py
+        fichiers = list(dossier.rglob(f"*{extension}"))
+        
+        if not fichiers:
+            return []
+        
+        results = []
+        
+        # Scanner en parallèle
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(self.scanner_fichier, f, callback_progress): f
+                for f in fichiers
+            }
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    print(f"Erreur lors du scan: {e}")
+        
+        return results
+    
+    def vider_cache(self):
+        """Vide le cache"""
+        self.cache.clear()
+
+
+# ==============================================================================
+# 2. MONITEUR SYSTÈME (Signes Vitaux)
+# ==============================================================================
+class MoniteurVital:
+    """Surveille les signes vitaux de la machine"""
+    
+    def __init__(self):
+        self.vitals = {
+            "cpu_percent": 0,
+            "cpu_freq": 0,
+            "ram_percent": 0,
+            "ram_used_gb": 0,
+            "ram_total_gb": 0,
+            "disk_percent": 0,
+            "disk_used_gb": 0,
+            "disk_total_gb": 0,
+            "temperature": 0,
+            "network_sent": 0,
+            "network_recv": 0,
+            "battery_percent": None,
+            "process_count": 0
+        }
+        self.running = True
+        self.callbacks = []
+    
+    def get_temperature(self):
+        """Récupère la température CPU (multi-OS optimisé)"""
+        try:
+            if sys.platform == "win32":
+                try:
+                    import wmi
+                    w = wmi.WMI(namespace="root\\OpenHardwareMonitor")
+                    for sensor in w.Sensor(SensorType='Temperature'):
+                        if 'CPU' in sensor.Name:
+                            return sensor.Value
+                except:
+                    pass
+                return 0
+            elif sys.platform == "linux":
+                thermal_zones = Path("/sys/class/thermal/")
+                for zone in thermal_zones.glob("thermal_zone*"):
+                    temp_file = zone / "temp"
+                    if temp_file.exists():
+                        with open(temp_file, 'r') as f:
+                            return int(f.read()) / 1000
+            elif sys.platform == "darwin":
+                result = subprocess.run(['sysctl', 'hw.sensor.cpu.temp'], 
+                                       capture_output=True, text=True)
+                if result.returncode == 0:
+                    return float(result.stdout.split(':')[1].strip().replace('C', ''))
+        except:
+            pass
+        return 0
+    
+    def update(self):
+        """Met à jour tous les signes vitaux"""
+        try:
+            self.vitals["cpu_percent"] = psutil.cpu_percent(interval=0.3)
+            self.vitals["cpu_freq"] = psutil.cpu_freq().current if psutil.cpu_freq() else 0
+            
+            mem = psutil.virtual_memory()
+            self.vitals["ram_percent"] = mem.percent
+            self.vitals["ram_used_gb"] = mem.used / (1024**3)
+            self.vitals["ram_total_gb"] = mem.total / (1024**3)
+            
+            disk = psutil.disk_usage('/')
+            self.vitals["disk_percent"] = disk.percent
+            self.vitals["disk_used_gb"] = disk.used / (1024**3)
+            self.vitals["disk_total_gb"] = disk.total / (1024**3)
+            
+            net = psutil.net_io_counters()
+            self.vitals["network_sent"] = net.bytes_sent / (1024**2)
+            self.vitals["network_recv"] = net.bytes_recv / (1024**2)
+            
+            if hasattr(psutil, "sensors_battery"):
+                battery = psutil.sensors_battery()
+                if battery:
+                    self.vitals["battery_percent"] = battery.percent
+            
+            self.vitals["process_count"] = len(psutil.pids())
+            self.vitals["temperature"] = self.get_temperature()
+            
+        except Exception as e:
+            pass
+        
+        return self.vitals
+    
+    def start_monitoring(self, interval=2):
+        """Démarre la surveillance en continu"""
+        def monitor():
+            while self.running:
+                vitals = self.update()
+                for callback in self.callbacks:
+                    try:
+                        callback(vitals)
+                    except:
+                        pass
+                time.sleep(interval)
+        
+        thread = threading.Thread(target=monitor, daemon=True)
+        thread.start()
+    
+    def add_callback(self, callback):
+        self.callbacks.append(callback)
+    
+    def stop(self):
+        self.running = False
+
+
+# ==============================================================================
+# 3. DIAGNOSTICIEN CODE (Scanner Médical)
+# ==============================================================================
+class DiagnosticienCode:
+    """Analyse le code comme un médecin"""
+    
+    def __init__(self, fichier=None):
+        self.fichier = Path(fichier) if fichier else None
+        self.diagnostics = []
+        self.suggestions = []
+        self.score_global = 0
+        self.code = ""
+        self.tree = None
+    
+    def scanner_complet(self):
+        """Scanner médical complet"""
+        if not self.fichier or not self.fichier.exists():
+            return [], 0, []
+        
+        self.diagnostics = []
+        self.suggestions = []
+        self.score_global = 0
+        
+        try:
+            with open(self.fichier, 'r', encoding='utf-8') as f:
+                self.code = f.read()
+        except Exception as e:
+            self.diagnostics.append({
+                'type': 'LECTURE',
+                'severite': 10,
+                'message': f"Impossible de lire le fichier: {e}",
+                'solution': "Vérifie les permissions du fichier"
+            })
+            return self.diagnostics, 10, self.suggestions
+        
+        # Scanner syntaxique
+        self._verifier_syntaxe()
+        
+        # Scanner structurel
+        self._analyser_structure()
+        
+        # Scanner performance
+        self._analyser_performance()
+        
+        # Scanner sécurité
+        self._analyser_securite()
+        
+        # Scanner qualité
+        self._analyser_qualite()
+        
+        # Scanner dépendances
+        self._analyser_dependances()
+        
+        # Scanner complexité cyclomatique
+        self._analyser_complexite()
+        
+        # Générer des suggestions automatiques
+        self._generer_suggestions()
+        
+        self.score_global = sum(d.get('severite', 0) for d in self.diagnostics)
+        
+        return self.diagnostics, self.score_global, self.suggestions
+    
+    def _verifier_syntaxe(self):
+        """Vérifie la syntaxe"""
+        try:
+            self.tree = ast.parse(self.code)
+        except SyntaxError as e:
+            self.diagnostics.append({
+                'type': 'SYNTAXE',
+                'severite': 10,
+                'ligne': e.lineno,
+                'colonne': e.offset,
+                'message': e.msg,
+                'code': e.text.strip() if e.text else '',
+                'solution': "Corrige la syntaxe à cette ligne"
+            })
+            self._ouvrir_vscode_a_ligne(e.lineno)
+        except Exception as e:
+            self.diagnostics.append({
+                'type': 'SYNTAXE',
+                'severite': 8,
+                'message': f"Erreur d'analyse: {e}",
+                'solution': "Vérifie la structure de ton code"
+            })
+    
+    def _analyser_structure(self):
+        """Analyse la structure du code"""
+        if not self.tree:
+            return
+        
+        try:
+            # Fonctions trop longues
+            for node in ast.walk(self.tree):
+                if isinstance(node, ast.FunctionDef):
+                    lignes = node.end_lineno - node.lineno if node.end_lineno else 0
+                    if lignes > 50:
+                        self.diagnostics.append({
+                            'type': 'STRUCTURE',
+                            'severite': 5,
+                            'ligne': node.lineno,
+                            'message': f"Fonction '{node.name}' trop longue ({lignes} lignes)",
+                            'solution': "Découpe cette fonction en plusieurs sous-fonctions"
+                        })
+                    
+                    # Trop de paramètres
+                    if len(node.args.args) > 5:
+                        self.diagnostics.append({
+                            'type': 'STRUCTURE',
+                            'severite': 4,
+                            'ligne': node.lineno,
+                            'message': f"Fonction '{node.name}' a {len(node.args.args)} paramètres",
+                            'solution': "Regroupe les paramètres dans une classe ou un dictionnaire"
+                        })
+            
+            # Classes trop grosses
+            for node in ast.walk(self.tree):
+                if isinstance(node, ast.ClassDef):
+                    methods = [n for n in ast.walk(node) if isinstance(n, ast.FunctionDef)]
+                    if len(methods) > 15:
+                        self.diagnostics.append({
+                            'type': 'STRUCTURE',
+                            'severite': 6,
+                            'ligne': node.lineno,
+                            'message': f"Classe '{node.name}' a {len(methods)} méthodes",
+                            'solution': "Sépare cette classe en plusieurs classes plus petites"
+                        })
+        except:
+            pass
+    
+    def _analyser_performance(self):
+        """Analyse les problèmes de performance"""
+        if not self.tree:
+            return
+        
+        lignes = self.code.split('\n')
+        
+        for i, ligne in enumerate(lignes, 1):
+            # Boucles avec append
+            if 'for' in ligne and 'range' in ligne and 'append' in ligne:
+                self.diagnostics.append({
+                    'type': 'PERFORMANCE',
+                    'severite': 4,
+                    'ligne': i,
+                    'message': "Boucle avec .append() - peut être optimisée",
+                    'solution': "Utilise une list comprehension: [expr for item in iterable]"
+                })
+            
+            # Concaténation de strings dans une boucle
+            if 'for' in ligne and '+' in ligne and 'str' in ligne:
+                self.diagnostics.append({
+                    'type': 'PERFORMANCE',
+                    'severite': 5,
+                    'ligne': i,
+                    'message': "Concaténation de strings dans une boucle",
+                    'solution': "Utilise ''.join(liste) pour meilleure performance"
+                })
+            
+            # Try/except trop large
+            if 'except:' in ligne and 'Exception' not in ligne:
+                self.diagnostics.append({
+                    'type': 'PERFORMANCE',
+                    'severite': 3,
+                    'ligne': i,
+                    'message': "Except nu détecté",
+                    'solution': "Spécifie le type d'exception: except SpecificError:"
+                })
+    
+    def _analyser_securite(self):
+        """Analyse les failles de sécurité"""
+        if not self.code:
+            return
+        
+        # eval/exec
+        if 'eval(' in self.code or 'exec(' in self.code:
+            self.diagnostics.append({
+                'type': 'SECURITE',
+                'severite': 9,
+                'message': "Usage de eval() ou exec() détecté",
+                'solution': "Ces fonctions sont dangereuses. Utilise ast.literal_eval() ou une alternative"
+            })
+        
+        # Chemins absolus
+        if re.search(r'[A-Z]:\\', self.code) or '/home/' in self.code:
+            self.diagnostics.append({
+                'type': 'SECURITE',
+                'severite': 5,
+                'message': "Chemin absolu détecté",
+                'solution': "Utilise pathlib.Path() ou os.path.join() pour les chemins portables"
+            })
+        
+        # Input sans validation
+        if 'input(' in self.code and 'int(' not in self.code.split('input(')[1][:50] if 'input(' in self.code else False:
+            self.diagnostics.append({
+                'type': 'SECURITE',
+                'severite': 6,
+                'message': "Input utilisateur sans validation",
+                'solution': "Valide et sanitize toutes les entrées utilisateur"
+            })
+    
+    def _analyser_qualite(self):
+        """Analyse la qualité du code"""
+        if not self.code:
+            return
+        
+        lignes = self.code.split('\n')
+        
+        # Lignes trop longues
+        for i, line in enumerate(lignes, 1):
+            if len(line) > 100:
+                self.diagnostics.append({
+                    'type': 'QUALITE',
+                    'severite': 2,
+                    'ligne': i,
+                    'message': f"Ligne trop longue ({len(line)} caractères)",
+                    'solution': "Coupe cette ligne en plusieurs"
+                })
+        
+        # Commentaires insuffisants
+        code_lines = [l for l in lignes if l.strip() and not l.strip().startswith('#')]
+        comment_lines = [l for l in lignes if l.strip().startswith('#')]
+        
+        if len(code_lines) > 20 and len(comment_lines) < len(code_lines) * 0.1:
+            self.diagnostics.append({
+                'type': 'QUALITE',
+                'severite': 3,
+                'message': "Peu de commentaires",
+                'solution': "Ajoute des docstrings et des commentaires pour expliquer la logique"
+            })
+        
+        # Variables mal nommées
+        if self.tree:
+            for node in ast.walk(self.tree):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    if len(node.id) == 1 and node.id not in ['i', 'j', 'k', 'x', 'y', 'z']:
+                        self.diagnostics.append({
+                            'type': 'QUALITE',
+                            'severite': 2,
+                            'message': f"Variable '{node.id}' trop courte",
+                            'solution': "Utilise des noms de variables explicites"
+                        })
+    
+    def _analyser_dependances(self):
+        """Analyse les dépendances du projet"""
+        if not self.tree:
+            return
+        
+        imports = []
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imports.append(alias.name.split('.')[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imports.append(node.module.split('.')[0])
+        
+        imports = list(set(imports))
+        builtins_modules = set(dir(builtins))
+        
+        for imp in imports:
+            if imp in builtins_modules:
+                continue
+            try:
+                __import__(imp)
+            except ImportError:
+                self.diagnostics.append({
+                    'type': 'DEPENDANCE',
+                    'severite': 8,
+                    'message': f"Module '{imp}' non installé",
+                    'solution': f"pip install {imp}"
+                })
+            except Exception:
+                pass
+    
+    def _analyser_complexite(self):
+        """Analyse la complexité cyclomatique du code"""
+        if not self.tree:
+            return
+        
+        def calculer_complexite_noeud(node):
+            """Calcule la complexité cyclomatique d'un noeud"""
+            complexite = 1
+            for enfant in ast.walk(node):
+                if isinstance(enfant, (ast.If, ast.While, ast.For, ast.And, ast.Or)):
+                    complexite += 1
+                elif isinstance(enfant, ast.Try):
+                    complexite += len(enfant.handlers)
+                elif isinstance(enfant, ast.BoolOp):
+                    complexite += len(enfant.values) - 1
+            return complexite
+        
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef):
+                complexite = calculer_complexite_noeud(node)
+                if complexite > 10:
+                    self.diagnostics.append({
+                        'type': 'COMPLEXITE',
+                        'severite': 7,
+                        'ligne': node.lineno,
+                        'message': f"Fonction '{node.name}' a une complexité cyclomatique de {complexite} (max recommandé: 10)",
+                        'solution': "Découpe cette fonction en plusieurs fonctions plus petites"
+                    })
+                elif complexite > 5:
+                    self.diagnostics.append({
+                        'type': 'COMPLEXITE',
+                        'severite': 4,
+                        'ligne': node.lineno,
+                        'message': f"Fonction '{node.name}' a une complexité cyclomatique de {complexite}",
+                        'solution': "Envisage de simplifier cette fonction"
+                    })
+    
+    def _generer_suggestions(self):
+        """Génère des suggestions automatiques de correction"""
+        if not self.diagnostics:
+            self.suggestions.append({
+                'type': 'SUGGESTION',
+                'message': "Aucun problème détecté. Ton code est en bonne santé !",
+                'action': "Continue comme ça"
+            })
+            return
+        
+        types = {}
+        for d in self.diagnostics:
+            t = d['type']
+            if t not in types:
+                types[t] = []
+            types[t].append(d)
+        
+        if 'SYNTAXE' in types:
+            self.suggestions.append({
+                'type': 'SUGGESTION',
+                'message': f"{len(types['SYNTAXE'])} erreur(s) de syntaxe détectée(s)",
+                'action': "Corrige d'abord les erreurs de syntaxe, les autres problèmes pourraient disparaître"
+            })
+        
+        if 'DEPENDANCE' in types:
+            modules = list(set([d['message'].split("'")[1] for d in types['DEPENDANCE'] if "'" in d['message']]))
+            self.suggestions.append({
+                'type': 'SUGGESTION',
+                'message': f"Modules manquants: {', '.join(modules)}",
+                'action': f"pip install {' '.join(modules)}"
+            })
+        
+        if 'PERFORMANCE' in types:
+            self.suggestions.append({
+                'type': 'SUGGESTION',
+                'message': f"{len(types['PERFORMANCE'])} problème(s) de performance",
+                'action': "Utilise des list comprehensions et évite les concaténations dans les boucles"
+            })
+        
+        if 'COMPLEXITE' in types:
+            self.suggestions.append({
+                'type': 'SUGGESTION',
+                'message': "Complexité cyclomatique élevée",
+                'action': "Extrais les conditions complexes dans des fonctions séparées"
+            })
+        
+        if 'SECURITE' in types:
+            self.suggestions.append({
+                'type': 'SUGGESTION',
+                'message': "Problèmes de sécurité détectés",
+                'action': "Évite eval/exec, valide les inputs utilisateur"
+            })
+        
+        if 'QUALITE' in types:
+            self.suggestions.append({
+                'type': 'SUGGESTION',
+                'message': "Problèmes de qualité de code",
+                'action': "Ajoute des commentaires, utilise des noms de variables explicites"
+            })
+    
+    def generer_tests(self):
+        """Génère des tests unitaires automatiquement"""
+        if not self.tree or not self.fichier:
+            return None
+        
+        test_code = f'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🧪 Tests unitaires générés automatiquement par ERVI
+Fichier source: {self.fichier.name}
+Date: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+"""
+
+import unittest
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname("{self.fichier}"))
+
+try:
+    from {self.fichier.stem} import *
+except ImportError as e:
+    print(f"Erreur d'import: {{e}}")
+    sys.exit(1)
+
+
+class Test{self.fichier.stem.capitalize()}(unittest.TestCase):
+    """Tests automatiques pour {self.fichier.name}"""
+    
+'''
+        functions = []
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef):
+                functions.append(node.name)
+        
+        for func in functions[:10]:
+            test_code += f'''
+    def test_{func}(self):
+        """Test de la fonction {func}"""
+        # TODO: Ajouter des cas de test pertinents
+        self.assertTrue(True)
+        
+'''
+        
+        test_code += '''
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
+'''
+        
+        test_file = config.DOSSIER_TESTS / f"test_{self.fichier.stem}.py"
+        with open(test_file, 'w', encoding='utf-8') as f:
+            f.write(test_code)
+        
+        return test_file
+    
+    def _ouvrir_vscode_a_ligne(self, ligne):
+        """Ouvre VS Code à la ligne exacte"""
+        try:
+            subprocess.Popen(["code", "-g", f"{self.fichier}:{ligne}"], 
+                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+            return True
+        except:
+            return False
+
+
+# ==============================================================================
+# 4. INTERFACE PRINCIPALE ERVI (Tkinter Uniquement)
+# ==============================================================================
+class InterfaceERVI:
+    """Interface graphique du médecin ERVI"""
+    
+    def __init__(self):
+        self.root = Tk()
+        self.root.title("🏥 ERVI - Le Médecin Local du Codeur")
+        self.root.geometry("1500x850")
+        self.root.configure(bg='#0a0a0a')
+        
+        self.root.option_add('*Font', 'Consolas 10')
+        
+        self.theme_sombre = True
+        self.colors = self._get_theme_colors()
+        
+        self.moniteur = MoniteurVital()
+        self.diagnosticien = None
+        self.fichier_actuel = None
+        self.surveillance_active = False
+        self.dernier_diagnostics = []
+        self.dernier_suggestions = []
+        
+        # Multi-threading
+        self.scanner_mt = ScannerMultiThread()
+        self.scan_projet_en_cours = False
+        self.scan_annule = False
+        
+        self.setup_ui()
+        self.demarrer_surveillance()
+    
+    def _get_theme_colors(self):
+        if self.theme_sombre:
+            return {
+                'bg': '#0a0a0a', 'bg_card': '#111111', 'text': '#00ff00',
+                'text_secondary': '#88ff88', 'critical': '#ff3333',
+                'warning': '#ffaa33', 'info': '#33ff33', 'border': '#00ff00',
+                'select': '#1a3a1a', 'button_bg': '#1a1a1a', 'button_fg': '#00ff00'
+            }
+        else:
+            return {
+                'bg': '#f0f0f0', 'bg_card': '#ffffff', 'text': '#006600',
+                'text_secondary': '#228822', 'critical': '#cc0000',
+                'warning': '#cc8800', 'info': '#228822', 'border': '#006600',
+                'select': '#e0ffe0', 'button_bg': '#e0e0e0', 'button_fg': '#006600'
+            }
+    
+    def toggle_theme(self):
+        self.theme_sombre = not self.theme_sombre
+        self.colors = self._get_theme_colors()
+        self.root.configure(bg=self.colors['bg'])
+        self.reload_ui()
+    
+    def reload_ui(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        self.setup_ui()
+    
+    def setup_ui(self):
+        main_frame = Frame(self.root, bg=self.colors['bg'])
+        main_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        
+        # HEADER
+        header_frame = Frame(main_frame, bg=self.colors['bg_card'], relief=RAISED, bd=1)
+        header_frame.pack(fill=X, pady=(0, 10))
+        
+        title = Label(header_frame, text="🏥 ERVI - MÉDECIN LOCAL DU CODEUR",
+                     font=('Consolas', 20, 'bold'), bg=self.colors['bg_card'], fg=self.colors['text'])
+        title.pack(pady=10)
+        
+        subtitle = Label(header_frame, text="Diagnostic complet | Surveillance temps réel | 100% Local | Multi-Threading + Cache",
+                        font=('Consolas', 10), bg=self.colors['bg_card'], fg=self.colors['text_secondary'])
+        subtitle.pack(pady=(0, 10))
+        
+        # SIGNES VITAUX
+        vital_frame = LabelFrame(main_frame, text="🩺 SIGNES VITAUX DE LA MACHINE",
+                                 font=('Consolas', 11, 'bold'), bg=self.colors['bg'],
+                                 fg=self.colors['text'], bd=2, relief=GROOVE)
+        vital_frame.pack(fill=X, pady=(0, 10))
+        
+        self.vital_labels = {}
+        vitals_grid = Frame(vital_frame, bg=self.colors['bg'])
+        vitals_grid.pack(padx=10, pady=10)
+        
+        vitals_config = [
+            ('💻 CPU', 'cpu', '%'), ('⚡ FREQ', 'freq', 'MHz'),
+            ('🧠 RAM', 'ram', '%'), ('💾 DISQUE', 'disk', '%'),
+            ('🌡️ TEMP', 'temp', '°C'), ('📡 RÉSEAU', 'net', 'MB'),
+            ('🔋 BATTERIE', 'batt', '%'), ('📊 PROCESSUS', 'proc', '')
+        ]
+        
+        for i, (label, key, unit) in enumerate(vitals_config):
+            card = Frame(vitals_grid, bg=self.colors['bg_card'], relief=RAISED, bd=1)
+            card.grid(row=i//4, column=i%4, padx=5, pady=5, sticky='nsew')
+            
+            Label(card, text=label, font=('Consolas', 9), bg=self.colors['bg_card'],
+                  fg=self.colors['text_secondary']).pack(pady=(5,0))
+            lbl_value = Label(card, text='--', font=('Consolas', 14, 'bold'),
+                             bg=self.colors['bg_card'], fg=self.colors['text'])
+            lbl_value.pack(pady=5)
+            Label(card, text=unit, font=('Consolas', 8), bg=self.colors['bg_card'],
+                  fg=self.colors['text_secondary']).pack(pady=(0,5))
+            self.vital_labels[key] = lbl_value
+        
+        # ZONE PATIENT
+        patient_frame = LabelFrame(main_frame, text="📁 PATIENT", font=('Consolas', 11, 'bold'),
+                                   bg=self.colors['bg'], fg=self.colors['text'], bd=2, relief=GROOVE)
+        patient_frame.pack(fill=X, pady=(0, 10))
+        
+        patient_inner = Frame(patient_frame, bg=self.colors['bg'])
+        patient_inner.pack(fill=X, padx=10, pady=10)
+        
+        self.file_label = Label(patient_inner, text="Aucun fichier sélectionné",
+                                font=('Consolas', 10), bg=self.colors['bg'], fg='#888888')
+        self.file_label.pack(side=LEFT, padx=5)
+        
+        btn_frame = Frame(patient_inner, bg=self.colors['bg'])
+        btn_frame.pack(side=RIGHT)
+        
+        Button(btn_frame, text="📁 SCANNER", command=self.scanner_fichier,
+               bg=self.colors['button_bg'], fg=self.colors['button_fg'],
+               font=('Consolas', 10, 'bold'), relief=FLAT, bd=1,
+               padx=15, pady=5, cursor='hand2').pack(side=LEFT, padx=5)
+        
+        # NOUVEAU: Bouton SCANNER PROJET (multi-thread)
+        Button(btn_frame, text="📁📁 SCANNER PROJET", command=self.scanner_projet,
+               bg=self.colors['button_bg'], fg=self.colors['warning'],
+               font=('Consolas', 10, 'bold'), relief=FLAT, bd=1,
+               padx=15, pady=5, cursor='hand2').pack(side=LEFT, padx=5)
+        
+        Button(btn_frame, text="🧪 GÉNÉRER TESTS", command=self.generer_tests,
+               bg=self.colors['button_bg'], fg=self.colors['warning'],
+               font=('Consolas', 10, 'bold'), relief=FLAT, bd=1,
+               padx=15, pady=5, cursor='hand2').pack(side=LEFT, padx=5)
+        
+        Button(btn_frame, text="🔍 OUVRIR VS CODE", command=self.ouvrir_vscode,
+               bg=self.colors['button_bg'], fg=self.colors['text_secondary'],
+               font=('Consolas', 10), relief=FLAT, bd=1,
+               padx=15, pady=5, cursor='hand2').pack(side=LEFT, padx=5)
+        
+        Button(btn_frame, text="📄 EXPORT RAPPORT", command=self.exporter_rapport,
+               bg=self.colors['button_bg'], fg=self.colors['info'],
+               font=('Consolas', 10), relief=FLAT, bd=1,
+               padx=15, pady=5, cursor='hand2').pack(side=LEFT, padx=5)
+        
+        Button(btn_frame, text="🗑️ VIDER CACHE", command=self.vider_cache,
+               bg=self.colors['button_bg'], fg=self.colors['critical'],
+               font=('Consolas', 10), relief=FLAT, bd=1,
+               padx=15, pady=5, cursor='hand2').pack(side=LEFT, padx=5)
+        
+        Button(btn_frame, text="🌓 THÈME", command=self.toggle_theme,
+               bg=self.colors['button_bg'], fg=self.colors['text_secondary'],
+               font=('Consolas', 10), relief=FLAT, bd=1,
+               padx=15, pady=5, cursor='hand2').pack(side=LEFT, padx=5)
+        
+        self.surv_btn = Button(btn_frame, text="🩺 AUSCULTATION OFF",
+                               command=self.toggle_surveillance,
+                               bg=self.colors['button_bg'], fg='#888888',
+                               font=('Consolas', 10), relief=FLAT, bd=1,
+                               padx=15, pady=5, cursor='hand2')
+        self.surv_btn.pack(side=LEFT, padx=5)
+        
+        # ZONE DIAGNOSTIC (gauche) + SUGGESTIONS (droite)
+        diag_container = Frame(main_frame, bg=self.colors['bg'])
+        diag_container.pack(fill=BOTH, expand=True)
+        
+        diag_frame = LabelFrame(diag_container, text="🔬 DIAGNOSTIC MÉDICAL",
+                                font=('Consolas', 11, 'bold'), bg=self.colors['bg'],
+                                fg=self.colors['text'], bd=2, relief=GROOVE)
+        diag_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 5))
+        
+        self.score_frame = Frame(diag_frame, bg=self.colors['bg'])
+        self.score_frame.pack(fill=X, padx=10, pady=10)
+        
+        self.score_label = Label(self.score_frame, text="Score de santé: --",
+                                 font=('Consolas', 12, 'bold'), bg=self.colors['bg'], fg=self.colors['text'])
+        self.score_label.pack()
+        
+        self.result_text = scrolledtext.ScrolledText(diag_frame, bg=self.colors['bg_card'],
+                                                      fg=self.colors['text'], font=('Consolas', 10),
+                                                      insertbackground=self.colors['text'], wrap=WORD, bd=0)
+        self.result_text.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        
+        sugg_frame = LabelFrame(diag_container, text="💡 SUGGESTIONS & CORRECTIONS",
+                                font=('Consolas', 11, 'bold'), bg=self.colors['bg'],
+                                fg=self.colors['warning'], bd=2, relief=GROOVE)
+        sugg_frame.pack(side=RIGHT, fill=BOTH, expand=True, padx=(5, 0))
+        
+        self.sugg_text = scrolledtext.ScrolledText(sugg_frame, bg=self.colors['bg_card'],
+                                                    fg=self.colors['warning'], font=('Consolas', 10),
+                                                    insertbackground=self.colors['text'], wrap=WORD, bd=0)
+        self.sugg_text.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        
+        # Tags de couleur
+        self.result_text.tag_config('critical', foreground=self.colors['critical'])
+        self.result_text.tag_config('warning', foreground=self.colors['warning'])
+        self.result_text.tag_config('info', foreground=self.colors['info'])
+        self.result_text.tag_config('header', foreground=self.colors['text'], font=('Consolas', 12, 'bold'))
+        
+        self.sugg_text.tag_config('suggestion', foreground=self.colors['warning'], font=('Consolas', 10, 'bold'))
+        self.sugg_text.tag_config('action', foreground=self.colors['info'])
+        
+        # Barre de statut
+        self.status_bar = Label(self.root, text="✅ ERVI prêt | Glisse-dépose un fichier .py | SCANNER PROJET pour scanner un dossier complet",
+                                bg=self.colors['bg_card'], fg=self.colors['text_secondary'],
+                                font=('Consolas', 9), relief=SUNKEN, anchor=W)
+        self.status_bar.pack(side=BOTTOM, fill=X)
+        
+        # Drag & drop
+        self.root.drop_target_register('*')
+        self.root.dnd_bind('<<Drop>>', self.on_drop)
+    
+    def update_vitals(self, vitals):
+        try:
+            self.vital_labels['cpu'].config(text=f"{vitals['cpu_percent']:.0f}")
+            self.vital_labels['freq'].config(text=f"{vitals['cpu_freq']:.0f}")
+            self.vital_labels['ram'].config(text=f"{vitals['ram_percent']:.0f}")
+            self.vital_labels['disk'].config(text=f"{vitals['disk_percent']:.0f}")
+            
+            temp = vitals['temperature']
+            temp_color = self.colors['info'] if temp < 60 else self.colors['warning'] if temp < 80 else self.colors['critical']
+            self.vital_labels['temp'].config(text=f"{temp:.1f}", fg=temp_color)
+            self.vital_labels['net'].config(text=f"{vitals['network_sent']:.0f}")
+            
+            if vitals['battery_percent']:
+                self.vital_labels['batt'].config(text=f"{vitals['battery_percent']:.0f}")
+            else:
+                self.vital_labels['batt'].config(text="--")
+            
+            self.vital_labels['proc'].config(text=f"{vitals['process_count']}")
+            
+            if vitals['temperature'] > 85:
+                self.status_bar.config(text="⚠️ ALERTE CRITIQUE: Température CPU très élevée !", fg=self.colors['critical'])
+            elif vitals['temperature'] > 70:
+                self.status_bar.config(text="⚠️ Attention: Température CPU élevée", fg=self.colors['warning'])
+        except:
+            pass
+    
+    def demarrer_surveillance(self):
+        self.moniteur.add_callback(self.update_vitals)
+        self.moniteur.start_monitoring(interval=2)
+    
+    def scanner_fichier(self):
+        fichier = filedialog.askopenfilename(
+            title="Sélectionne un fichier Python à diagnostiquer",
+            filetypes=[("Python files", "*.py"), ("Tous les fichiers", "*.*")]
+        )
+        if fichier:
+            self.diagnostiquer_fichier(fichier)
+    
+    def scanner_projet(self):
+        """Scanne un dossier entier avec multi-threading + cache"""
+        dossier = filedialog.askdirectory(title="Sélectionne le dossier du projet à diagnostiquer")
+        if not dossier:
+            return
+        
+        if self.scan_projet_en_cours:
+            if messagebox.askyesno("ERVI", "Un scan est déjà en cours. Voulez-vous l'annuler ?"):
+                self.scan_annule = True
+            return
+        
+        self.result_text.delete(1.0, END)
+        self.result_text.insert(END, f"🏥 ERVI - SCAN DE PROJET (Multi-Threading)\n", 'header')
+        self.result_text.insert(END, "═" * 60 + "\n\n")
+        self.result_text.insert(END, f"Dossier: {dossier}\n")
+        self.result_text.insert(END, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        self.result_text.insert(END, f"Cœurs disponibles: {multiprocessing.cpu_count()}\n\n")
+        self.result_text.insert(END, "🔍 Scan en cours...\n\n")
+        
+        self.sugg_text.delete(1.0, END)
+        self.sugg_text.insert(END, "💡 SCAN EN COURS...\n", 'suggestion')
+        self.sugg_text.insert(END, "Le scan utilise tous les cœurs de ton processeur.\n", 'action')
+        self.sugg_text.insert(END, "Les résultats apparaîtront au fur et à mesure.\n\n", 'action')
+        
+        self.status_bar.config(text=f"🔬 Scan du projet {dossier} en cours...", fg=self.colors['warning'])
+        self.root.update()
+        
+        self.scan_projet_en_cours = True
+        self.scan_annule = False
+        self.fichiers_scannes = 0
+        self.tous_resultats = []
+        self.progression_label = None
+        
+        # Barre de progression
+        progress_frame = Frame(self.result_text, bg=self.colors['bg_card'])
+        self.result_text.window_create(END, window=progress_frame)
+        self.progress_bar = ttk.Progressbar(progress_frame, length=400, mode='determinate')
+        self.progress_bar.pack(pady=5)
+        self.progress_label = Label(progress_frame, text="Préparation...", bg=self.colors['bg_card'], fg=self.colors['text'])
+        self.progress_label.pack()
+        
+        def on_progress(fichier, status):
+            if self.scan_annule:
+                return
+            self.fichiers_scannes += 1
+            self.root.after(0, lambda: self.progress_label.config(text=f"Scanné: {Path(fichier).name} ({status})"))
+            self.root.after(0, lambda: self.progress_bar.step(1))
+        
+        def on_finish(results):
+            self.scan_projet_en_cours = False
+            self.root.after(0, lambda: self.progress_frame_destroy())
+            
+            if results is None:
+                self.root.after(0, lambda: self.result_text.insert(END, "\n❌ Scan annulé.\n", 'critical'))
+                self.root.after(0, lambda: self.status_bar.config(text="Scan annulé", fg=self.colors['warning']))
+                return
+            
+            self.tous_resultats = results
+            
+            # Compter les résultats
+            total = len(results)
+            avec_problemes = sum(1 for r in results if r[1] > 0)
+            depuis_cache = sum(1 for r in results if r[4])  # r[4] = depuis_cache
+            
+            self.root.after(0, lambda: self.result_text.insert(END, "\n" + "═" * 60 + "\n", 'header'))
+            self.root.after(0, lambda: self.result_text.insert(END, "📊 RÉSUMÉ DU SCAN\n", 'header'))
+            self.root.after(0, lambda: self.result_text.insert(END, f"Total fichiers: {total}\n"))
+            self.root.after(0, lambda: self.result_text.insert(END, f"Fichiers avec problèmes: {avec_problemes}\n"))
+            self.root.after(0, lambda: self.result_text.insert(END, f"Fichiers depuis cache: {depuis_cache}\n"))
+            self.root.after(0, lambda: self.result_text.insert(END, f"Fichiers scannés réellement: {total - depuis_cache}\n\n"))
+            
+            # Afficher les détails
+            self.root.after(0, lambda: self.result_text.insert(END, "📄 DÉTAILS PAR FICHIER:\n", 'warning'))
+            self.root.after(0, lambda: self.result_text.insert(END, "═" * 40 + "\n"))
+            
+            for r in results:
+                fichier, diagnostics, score, suggestions, depuis_cache_flag = r
+                nom = Path(fichier).name
+                if score == 0:
+                    statut = "✅ SAIN"
+                    tag = 'info'
+                elif score < 30:
+                    statut = f"⚠️ SCORE {score}"
+                    tag = 'warning'
+                else:
+                    statut = f"🔴 CRITIQUE {score}"
+                    tag = 'critical'
+                
+                cache_info = " [CACHE]" if depuis_cache_flag else ""
+                self.root.after(0, lambda n=nom, s=statut, t=tag, c=cache_info: 
+                                self.result_text.insert(END, f"{n}: {s}{c}\n", t))
+            
+            self.root.after(0, lambda: self.status_bar.config(
+                text=f"✅ Scan terminé: {total} fichiers, {avec_problemes} avec problèmes, {depuis_cache} depuis cache",
+                fg=self.colors['info']))
+            
+            # Suggestions globales
+            self.root.after(0, lambda: self.sugg_text.insert(END, "📊 RÉSUMÉ DU PROJET\n", 'suggestion'))
+            self.root.after(0, lambda: self.sugg_text.insert(END, "═" * 50 + "\n\n"))
+            self.root.after(0, lambda: self.sugg_text.insert(END, f"Fichiers analysés: {total}\n"))
+            self.root.after(0, lambda: self.sugg_text.insert(END, f"Fichiers problématiques: {avec_problemes}\n"))
+            self.root.after(0, lambda: self.sugg_text.insert(END, f"Taux de santé: {(total - avec_problemes)/total*100:.1f}%\n\n"))
+            
+            if avec_problemes > 0:
+                self.root.after(0, lambda: self.sugg_text.insert(END, "🔧 ACTIONS RECOMMANDÉES:\n", 'action'))
+                self.root.after(0, lambda: self.sugg_text.insert(END, "1. Ouvre les fichiers critiques dans VS Code\n"))
+                self.root.after(0, lambda: self.sugg_text.insert(END, "2. Corrige d'abord les erreurs de syntaxe\n"))
+                self.root.after(0, lambda: self.sugg_text.insert(END, "3. Relance le scan pour vérifier les corrections\n"))
+        
+        def progress_frame_destroy():
+            try:
+                self.progress_bar.destroy()
+                self.progress_label.destroy()
+            except:
+                pass
+        
+        # Lancer le scan en parallèle
+        def scan_thread():
+            try:
+                results = self.scanner_mt.scanner_dossier(dossier, callback_progress=on_progress)
+                self.root.after(0, lambda: on_finish(results))
+            except Exception as e:
+                self.root.after(0, lambda: on_finish(None))
+        
+        threading.Thread(target=scan_thread, daemon=True).start()
+    
+    def vider_cache(self):
+        """Vide le cache des diagnostics"""
+        if messagebox.askyesno("ERVI", "Vider le cache ? Les prochains scans seront plus lents mais à jour."):
+            self.scanner_mt.vider_cache()
+            self.status_bar.config(text="🗑️ Cache vidé", fg=self.colors['info'])
+            messagebox.showinfo("ERVI", "Cache vidé avec succès.")
+    
+    def on_drop(self, event):
+        fichier = event.data
+        if fichier.startswith('{') and fichier.endswith('}'):
+            fichier = fichier[1:-1]
+        if fichier.endswith('.py'):
+            self.diagnostiquer_fichier(fichier)
+    
+    def diagnostiquer_fichier(self, fichier):
+        self.fichier_actuel = fichier
+        self.file_label.config(text=f"📄 {os.path.basename(fichier)}", fg=self.colors['text'])
+        
+        self.result_text.delete(1.0, END)
+        self.result_text.insert(END, f"🏥 ERVI - RAPPORT MÉDICAL\n", 'header')
+        self.result_text.insert(END, "═" * 60 + "\n\n")
+        self.result_text.insert(END, f"Patient: {fichier}\n")
+        self.result_text.insert(END, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        self.sugg_text.delete(1.0, END)
+        
+        self.status_bar.config(text="🔬 Diagnostic en cours...", fg=self.colors['warning'])
+        self.root.update()
+        
+        self.diagnosticien = DiagnosticienCode(fichier)
+        diagnostics, score, suggestions = self.diagnosticien.scanner_complet()
+        
+        self.dernier_diagnostics = diagnostics
+        self.dernier_suggestions = suggestions
+        
+        if not diagnostics:
+            self.result_text.insert(END, "✅ CODE EN PARFAITE SANTÉ !\n", 'info')
+            self.result_text.insert(END, "Aucun problème détecté. Félicitations !\n")
+            self.score_label.config(text="Score de santé: 0/100 - CODE PARFAIT", fg=self.colors['info'])
+            self.status_bar.config(text="✅ Diagnostic terminé - Code sain", fg=self.colors['info'])
+        else:
+            self.result_text.insert(END, f"🔴 {len(diagnostics)} PROBLÈME(S) DÉTECTÉ(S)\n\n", 'critical')
+            
+            for d in diagnostics:
+                severity = d.get('severite', 0)
+                tag = 'critical' if severity >= 8 else 'warning' if severity >= 4 else 'info'
+                
+                self.result_text.insert(END, f"[{d['type']}] ", tag)
+                self.result_text.insert(END, f"Sévérité {severity}/10\n")
+                
+                if 'ligne' in d:
+                    self.result_text.insert(END, f"📍 Ligne {d['ligne']}\n")
+                self.result_text.insert(END, f"📝 {d['message']}\n")
+                if 'solution' in d:
+                    self.result_text.insert(END, f"💊 Ordonnance: {d['solution']}\n")
+                self.result_text.insert(END, f"{'─' * 50}\n\n")
+            
+            if score == 0:
+                score_text = "CODE PARFAIT"
+                score_color = self.colors['info']
+            elif score < 30:
+                score_text = f"CODE SAIN - {score}/100"
+                score_color = self.colors['info']
+            elif score < 70:
+                score_text = f"CODE MALADE - {score}/100"
+                score_color = self.colors['warning']
+            else:
+                score_text = f"CODE CRITIQUE - {score}/100"
+                score_color = self.colors['critical']
+            
+            self.score_label.config(text=f"Score de santé: {score_text}", fg=score_color)
+            self.status_bar.config(text=f"⚠️ {len(diagnostics)} problèmes détectés - Score: {score}", fg=self.colors['warning'])
+        
+        if suggestions:
+            self.sugg_text.insert(END, "💡 SUGGESTIONS AUTOMATIQUES\n", 'suggestion')
+            self.sugg_text.insert(END, "═" * 50 + "\n\n")
+            for s in suggestions:
+                self.sugg_text.insert(END, f"📌 {s['message']}\n", 'suggestion')
+                self.sugg_text.insert(END, f"   ⚡ Action: {s['action']}\n\n", 'action')
+        else:
+            self.sugg_text.insert(END, "Aucune suggestion automatique pour le moment.\n", 'info')
+        
+        config.historique["consultations"].append({
+            "date": datetime.now().isoformat(),
+            "fichier": fichier,
+            "score": score,
+            "problemes": len(diagnostics)
+        })
+        with open(config.FICHIER_HISTORIQUE, 'w', encoding='utf-8') as f:
+            json.dump(config.historique, f, indent=2)
+        
+        if self.surveillance_active:
+            self.demarrer_auscultation_continue(fichier)
+    
+    def exporter_rapport(self):
+        if not self.dernier_diagnostics:
+            messagebox.showwarning("ERVI", "Aucun diagnostic à exporter. Scanne d'abord un fichier.")
+            return
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nom_fichier = f"rapport_ervi_{Path(self.fichier_actuel).stem}_{timestamp}.txt"
+        fichier_rapport = config.DOSSIER_RAPPORTS / nom_fichier
+        
+        try:
+            with open(fichier_rapport, 'w', encoding='utf-8') as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"🏥 ERVI - RAPPORT MÉDICAL\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"Patient: {self.fichier_actuel}\n")
+                f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Score de santé: {self.score_label.cget('text')}\n\n")
+                
+                f.write("🔬 DIAGNOSTICS:\n")
+                f.write("-" * 40 + "\n")
+                for d in self.dernier_diagnostics:
+                    f.write(f"[{d['type']}] Sévérité {d.get('severite', 0)}/10\n")
+                    if 'ligne' in d:
+                        f.write(f"Ligne {d['ligne']}\n")
+                    f.write(f"Message: {d['message']}\n")
+                    if 'solution' in d:
+                        f.write(f"Ordonnance: {d['solution']}\n")
+                    f.write("-" * 40 + "\n")
+                
+                if self.dernier_suggestions:
+                    f.write("\n💡 SUGGESTIONS:\n")
+                    f.write("-" * 40 + "\n")
+                    for s in self.dernier_suggestions:
+                        f.write(f"{s['message']}\n")
+                        f.write(f"Action: {s['action']}\n\n")
+            
+            messagebox.showinfo("ERVI", f"Rapport exporté avec succès !\n\nFichier: {fichier_rapport}")
+            self.status_bar.config(text=f"📄 Rapport exporté: {fichier_rapport}", fg=self.colors['info'])
+            
+            if messagebox.askyesno("ERVI", "Ouvrir le dossier contenant le rapport ?"):
+                os.startfile(config.DOSSIER_RAPPORTS)
+        except Exception as e:
+            messagebox.showerror("ERVI", f"Erreur lors de l'export: {e}")
+    
+    def generer_tests(self):
+        if not self.fichier_actuel:
+            messagebox.showwarning("ERVI", "Aucun fichier chargé. Scanne d'abord un fichier.")
+            return
+        
+        test_file = self.diagnosticien.generer_tests()
+        if test_file:
+            messagebox.showinfo("ERVI", f"Tests générés avec succès !\n\nFichier: {test_file}\n\nLance-le avec: python {test_file}")
+            self.status_bar.config(text=f"🧪 Tests générés: {test_file}", fg=self.colors['info'])
+            
+            if messagebox.askyesno("ERVI", "Ouvrir le fichier de test dans VS Code ?"):
+                subprocess.Popen(["code", str(test_file)])
+        else:
+            messagebox.showerror("ERVI", "Impossible de générer les tests.")
+    
+    def ouvrir_vscode(self):
+        if self.fichier_actuel:
+            subprocess.Popen(["code", self.fichier_actuel])
+            self.status_bar.config(text=f"🔍 Ouverture de {self.fichier_actuel} dans VS Code", fg=self.colors['info'])
+        else:
+            messagebox.showwarning("ERVI", "Aucun fichier chargé.")
+    
+    def toggle_surveillance(self):
+        self.surveillance_active = not self.surveillance_active
+        
+        if self.surveillance_active:
+            self.surv_btn.config(text="🩺 AUSCULTATION ON", fg=self.colors['warning'])
+            self.status_bar.config(text="🩺 Auscultation continue active - ERVI surveille ton code", fg=self.colors['warning'])
+            if self.fichier_actuel:
+                self.demarrer_auscultation_continue(self.fichier_actuel)
+        else:
+            self.surv_btn.config(text="🩺 AUSCULTATION OFF", fg='#888888')
+            self.status_bar.config(text="Auscultation continue désactivée", fg=self.colors['text_secondary'])
+            config.surveillance_active = False
+    
+    def demarrer_auscultation_continue(self, fichier):
+        def surveiller():
+            dernier_hash = None
+            while self.surveillance_active:
+                try:
+                    with open(fichier, 'rb') as f:
+                        contenu = f.read()
+                        hash_actuel = hashlib.md5(contenu).hexdigest()
+                    
+                    if dernier_hash and dernier_hash != hash_actuel:
+                        self.root.after(0, lambda: self.diagnostiquer_fichier(fichier))
+                        self.root.after(0, lambda: self.status_bar.config(
+                            text="🩺 Détection de changement - Nouveau diagnostic effectué", 
+                            fg=self.colors['warning']))
+                    
+                    dernier_hash = hash_actuel
+                except:
+                    pass
+                
+                time.sleep(5)
+        
+        config.surveillance_active = True
+        thread = threading.Thread(target=surveiller, daemon=True)
+        thread.start()
+    
+    def run(self):
+        self.root.mainloop()
+
+
+# ==============================================================================
+# POINT D'ENTRÉE
+# ==============================================================================
+def main():
+    print("""
+    ╔══════════════════════════════════════════════════════════════════════════════╗
+    ║                         🏥 ERVI - LE MÉDECIN LOCAL                          ║
+    ║                    Diagnosticien Ultime pour Codeur                         ║
+    ║                                                                              ║
+    ║  Version 3.2 | 100% Tkinter | 100% Local | Multi-Threading + Cache         ║
+    ║                                                                              ║
+    ║  ✅ Diagnostic complet du code                                              ║
+    ║  ✅ Surveillance RAM/CPU/Température en temps réel                         ║
+    ║  ✅ Ouvre VS Code à la ligne d'erreur                                      ║
+    ║  ✅ Génération automatique de tests unitaires                              ║
+    ║  ✅ Auscultation continue (surveillance en direct)                         ║
+    ║  ✅ Analyse des dépendances                                                ║
+    ║  ✅ Analyse complexité cyclomatique                                        ║
+    ║  ✅ Export rapport en .txt                                                 ║
+    ║  ✅ Mode nuit/jour                                                         ║
+    ║  ✅ Suggestions automatiques de correction                                 ║
+    ║  ✅ MULTI-THREADING + CACHE (scanner projet entier en parallèle)          ║
+    ║  ✅ SCANNER PROJET : scanne tous les .py d'un dossier avec tous les cœurs ║
+    ╚══════════════════════════════════════════════════════════════════════════════╝
+    """)
+    
+    app = InterfaceERVI()
+    
+    if len(sys.argv) > 1:
+        fichier = sys.argv[1]
+        if os.path.exists(fichier):
+            app.diagnostiquer_fichier(fichier)
+    
+    app.run()
+
+if __name__ == "__main__":
+    main()

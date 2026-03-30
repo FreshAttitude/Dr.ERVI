@@ -1,0 +1,133 @@
+================================================================================
+                          🔌 PLUGINS - ERVI v3.3
+                          Fonction et utilisation
+================================================================================
+
+
+1. QU'EST-CE QU'UN PLUGIN ?
+--------------------------------------------------------------------------------
+
+Un plugin est un fichier Python placé dans le dossier "plugins/" qui ajoute des
+règles de diagnostic personnalisées à ERVI.
+
+Ces règles s'exécutent automatiquement lors de chaque analyse de code, en
+complément des diagnostics intégrés (syntaxe, structure, performance, sécurité,
+qualité, complexité, dépendances).
+
+
+2. UTILITÉ
+--------------------------------------------------------------------------------
+
+- Ajouter des règles spécifiques à ton projet ou ton entreprise
+- Détecter des motifs de code propres à ton environnement
+- Imposer des conventions de codage personnalisées
+- Étendre ERVI sans modifier le code source
+- Créer des vérifications métier (ex: framework spécifique)
+
+
+3. EMPLACEMENT
+--------------------------------------------------------------------------------
+
+Les plugins sont stockés dans :
+    C:\Users\TonNom\ERVI\plugins\
+
+Ce dossier est créé automatiquement au premier lancement d'ERVI.
+Tous les fichiers .py présents dans ce dossier sont chargés automatiquement.
+
+
+4. INTERFACE GRAPHIQUE
+--------------------------------------------------------------------------------
+
+Bouton "🔌 PLUGINS" dans la zone PATIENT.
+
+Fenêtre qui s'ouvre :
+    - Liste des plugins disponibles
+    - Bouton "Créer un plugin" → génère un fichier template
+    - Bouton "Recharger" → recharge les plugins après modification
+    - Bouton "Ouvrir dossier" → ouvre le dossier plugins/ dans l'explorateur
+
+
+5. STRUCTURE D'UN PLUGIN
+--------------------------------------------------------------------------------
+
+Un plugin doit contenir :
+
+    description = "Texte de description du plugin"
+
+    def diagnostiquer(code, fichier):
+        # code = contenu du fichier (str)
+        # fichier = chemin du fichier (Path)
+
+        return diagnostics
+
+La fonction "diagnostiquer" doit retourner une liste de diagnostics.
+Chaque diagnostic est un dictionnaire avec les clés suivantes :
+
+    {
+        'type': 'NOM_DU_DIAGNOSTIC',      # obligatoire
+        'severite': 1 à 10,               # obligatoire (1=info, 10=critique)
+        'ligne': numéro_ligne,            # optionnel
+        'message': 'Description',         # obligatoire
+        'solution': 'Comment corriger'    # obligatoire
+    }
+
+
+6. CRÉER UN PLUGIN
+--------------------------------------------------------------------------------
+
+Étape 1 : Cliquer sur le bouton "🔌 PLUGINS"
+Étape 2 : Cliquer sur "Créer un plugin"
+Étape 3 : Un fichier "mon_plugin.py" est créé dans le dossier plugins/
+Étape 4 : Ouvrir ce fichier et modifier la fonction diagnostiquer()
+Étape 5 : Cliquer sur "Recharger" dans la fenêtre des plugins
+
+
+7. CHARGEMENT AUTOMATIQUE
+--------------------------------------------------------------------------------
+
+- Tous les plugins sont chargés au démarrage d'ERVI
+- Les plugins sont rechargés manuellement via le bouton "Recharger"
+- Les erreurs dans un plugin n'affectent pas le fonctionnement d'ERVI
+- Un plugin défaillant est ignoré avec un message d'erreur
+
+
+8. DÉSACTIVER UN PLUGIN
+--------------------------------------------------------------------------------
+
+Pour désactiver un plugin :
+    - Renommer le fichier avec une extension autre que .py
+    - OU déplacer le fichier hors du dossier plugins/
+    - OU supprimer le fichier
+
+
+9. LIMITATIONS
+--------------------------------------------------------------------------------
+
+- Les plugins sont exécutés dans l'ordre alphabétique des noms de fichiers
+- Un plugin trop lent peut ralentir l'analyse (recommandation : < 0.1s par fichier)
+- Les plugins n'ont pas accès à l'interface graphique
+- Les plugins sont 100% locaux, aucune communication externe
+
+
+10. DÉPANNAGE
+--------------------------------------------------------------------------------
+
+Problème : Le plugin ne s'affiche pas dans la liste
+    → Vérifier que le fichier est bien dans le dossier plugins/
+    → Vérifier que l'extension est .py
+    → Cliquer sur "Recharger"
+
+Problème : ERVI plante lors du chargement d'un plugin
+    → Ouvrir le dossier plugins/
+    → Déplacer le plugin suspect hors du dossier
+    → Redémarrer ERVI
+
+Problème : Les diagnostics du plugin n'apparaissent pas
+    → Vérifier que la fonction retourne bien une liste
+    → Vérifier que chaque diagnostic a les clés obligatoires
+    → Vérifier que le plugin ne contient pas d'erreur de syntaxe
+
+
+================================================================================
+Fin de la fiche
+================================================================================
